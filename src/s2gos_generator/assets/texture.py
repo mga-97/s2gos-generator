@@ -1,6 +1,7 @@
+import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import xarray as xr
@@ -81,20 +82,106 @@ class TextureGenerator:
     Generates texture maps from land cover data for use in 3D rendering.
     """
 
-    def __init__(self, materials: Optional[List[Dict]] = None):
+    def __init__(self, materials: Optional[List[Dict]] = None, materials_config_path: Optional[Union[str, Path]] = None):
         """
         Initialize the texture generator.
 
         Args:
-            materials: List of material definitions. If None, uses default materials.
+            materials: List of material definitions. If None, uses default materials or loads from config.
+            materials_config_path: Path to materials.json file. If provided, loads materials from file.
         """
-        self.materials = materials if materials is not None else DEFAULT_MATERIALS
+        if materials_config_path is not None:
+            self.materials, self.material_name_to_index = self._load_materials_from_config(materials_config_path)
+        elif materials is not None:
+            self.materials = materials
+            self.material_name_to_index = {mat["name"]: idx for idx, mat in enumerate(self.materials)}
+        else:
+            self.materials = DEFAULT_MATERIALS
+            self.material_name_to_index = {mat["name"]: idx for idx, mat in enumerate(self.materials)}
+            
         self.class_to_index = {
-            mat["esa_class"]: idx for idx, mat in enumerate(self.materials)
+            mat["esa_class"]: idx for idx, mat in enumerate(self.materials) if mat["esa_class"] is not None
         }
         logging.info(
             f"TextureGenerator initialized with {len(self.materials)} materials"
         )
+
+    def _load_materials_from_config(self, config_path: Union[str, Path]) -> Tuple[List[Dict], Dict[str, int]]:
+        """
+        Load materials from materials.json configuration file.
+        
+        Args:
+            config_path: Path to materials.json file
+            
+        Returns:
+            Tuple of (materials_list, material_name_to_index_mapping)
+        """
+        config_path = Path(config_path)
+        if not config_path.exists():
+            logging.warning(f"Materials config not found at {config_path}, using default materials")
+            return DEFAULT_MATERIALS, {mat["name"]: idx for idx, mat in enumerate(DEFAULT_MATERIALS)}
+        
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            
+            materials_config = config.get("materials", {})
+            landcover_mapping = config.get("landcover_mapping", {})
+            
+            # Build materials list from configuration 
+            materials = []
+            material_name_to_index = {}
+            
+            # Add landcover materials in the EXACT same order as scene generation
+            # This must match the hardcoded order in scene/config.py:216-228
+            landcover_order = [
+                "tree_cover", "shrubland", "grassland", "cropland", "built_up", 
+                "bare_sparse_vegetation", "snow_and_ice", "permanent_water_bodies", 
+                "herbaceous_wetland", "mangroves", "moss_and_lichen"
+            ]
+            
+            for landcover_class in landcover_order:
+                if landcover_class in landcover_mapping:
+                    material_name = landcover_mapping[landcover_class]
+                    if material_name in materials_config:
+                        # Map landcover classes to ESA classes (must match scene/config.py landcover_ids)
+                        landcover_to_esa = {
+                            "tree_cover": 10, "shrubland": 20, "grassland": 30, "cropland": 40,
+                            "built_up": 50, "bare_sparse_vegetation": 60, "snow_and_ice": 70,
+                            "permanent_water_bodies": 80, "herbaceous_wetland": 90,
+                            "mangroves": 95, "moss_and_lichen": 100
+                        }
+                        esa_class = landcover_to_esa.get(landcover_class)
+                        
+                        if esa_class is not None:
+                            mat_info = {
+                                "name": material_name,
+                                "esa_class": esa_class,
+                                "color_8bit": next((m["color_8bit"] for m in DEFAULT_MATERIALS if m["esa_class"] == esa_class), (128, 128, 128)),
+                                "roughness": next((m["roughness"] for m in DEFAULT_MATERIALS if m["esa_class"] == esa_class), 0.5)
+                            }
+                            materials.append(mat_info)
+                            material_name_to_index[material_name] = len(materials) - 1
+            
+            # Add additional materials (like soil types) that aren't in landcover mapping
+            for material_name in materials_config.keys():
+                if material_name not in material_name_to_index:
+                    mat_info = {
+                        "name": material_name,
+                        "esa_class": None,  # No ESA class for additional materials
+                        "color_8bit": (200, 150, 100),  # Default soil color
+                        "roughness": 0.8
+                    }
+                    materials.append(mat_info)
+                    material_name_to_index[material_name] = len(materials) - 1
+            
+            logging.info(f"Loaded {len(materials)} materials from {config_path}")
+            return materials, material_name_to_index
+            
+        except Exception as e:
+            logging.error(f"Failed to load materials from {config_path}: {e}")
+            logging.warning("Falling back to default materials")
+            return DEFAULT_MATERIALS, {mat["name"]: idx for idx, mat in enumerate(DEFAULT_MATERIALS)}
 
     def landcover_to_selection_texture(
         self,
@@ -138,6 +225,135 @@ class TextureGenerator:
         self._save_selection_texture(selection_texture, output_path)
 
         logging.info(f"Selection texture saved to {output_path}")
+        return selection_texture
+
+    def landcover_to_soil_aware_selection_texture(
+        self,
+        landcover_data: xr.DataArray,
+        wrb_soil_data: Optional[xr.DataArray],
+        output_path: Path,
+        flip_vertical: bool = False,
+        default_material_index: int = 7,
+        bare_vegetation_esa_class: int = 60,
+    ) -> np.ndarray:
+        """
+        Converts land cover data to soil-aware material selection texture.
+        
+        For bare/sparse vegetation areas (ESA class 60), uses WRB soil data to assign
+        specific soil materials. For all other areas, uses standard landcover mapping.
+
+        Args:
+            landcover_data: xarray DataArray containing land cover class values.
+            wrb_soil_data: Optional xarray DataArray containing WRB soil material indices.
+            output_path: Path where the texture PNG will be saved.
+            flip_vertical: If True, flips the texture vertically (for Mitsuba compatibility).
+            default_material_index: Material index to use for unknown classes.
+            bare_vegetation_esa_class: ESA class value for bare/sparse vegetation.
+
+        Returns:
+            The selection texture as a numpy array.
+        """
+        logging.info("Converting land cover data to soil-aware selection texture...")
+        landcover_data.load()
+        
+        if wrb_soil_data is not None:
+            wrb_soil_data.load()
+            logging.info("Using WRB soil data for bare terrain subdivision")
+        else:
+            logging.warning("No WRB soil data provided, falling back to standard landcover mapping")
+
+        class_values = landcover_data.values
+        selection_texture = np.full_like(
+            class_values, default_material_index, dtype=np.uint8
+        )
+
+        # First, apply standard landcover mapping for all non-bare areas
+        bare_mask = class_values == bare_vegetation_esa_class
+        for esa_class, material_index in self.class_to_index.items():
+            if esa_class != bare_vegetation_esa_class:  # Skip bare vegetation for now
+                mask = class_values == esa_class
+                selection_texture[mask] = material_index
+                logging.debug(
+                    f"Mapped {np.sum(mask)} pixels from ESA class {esa_class} to material index {material_index}"
+                )
+
+        # Handle bare/sparse vegetation areas with soil-aware mapping
+        if np.any(bare_mask):
+            bare_pixel_count = np.sum(bare_mask)
+            logging.info(f"Processing {bare_pixel_count} bare vegetation pixels with soil data...")
+            
+            if wrb_soil_data is not None:
+                try:
+                    # Get WRB soil material indices for bare areas
+                    wrb_values = wrb_soil_data.values
+                    
+                    # Create soil material index mapping using proper material names
+                    soil_material_names = {
+                        0: "baresoil",      # fallback
+                        1: "arenosols",     # arenosols  
+                        2: "regosols",      # regosols
+                        3: "leptosols",     # leptosols
+                        4: "calcisols",     # calcisols
+                        5: "solonchaks",    # solonchaks
+                    }
+                    
+                    # Map WRB soil classes to actual material indices
+                    soil_to_material_idx = {}
+                    for wrb_class, material_name in soil_material_names.items():
+                        if wrb_class == 0:
+                            # Use baresoil from landcover mapping as fallback
+                            fallback_idx = self.class_to_index.get(bare_vegetation_esa_class, default_material_index)
+                            soil_to_material_idx[0] = fallback_idx
+                            logging.info(f"WRB class 0 (fallback) → material index {fallback_idx}")
+                        else:
+                            # Look up material index by name
+                            material_idx = self.material_name_to_index.get(material_name)
+                            if material_idx is not None:
+                                soil_to_material_idx[wrb_class] = material_idx
+                                logging.info(f"WRB class {wrb_class} ({material_name}) → material index {material_idx}")
+                            else:
+                                # Fallback to baresoil if material not found
+                                logging.warning(f"Material {material_name} not found, using baresoil fallback")
+                                fallback_idx = self.class_to_index.get(bare_vegetation_esa_class, default_material_index)
+                                soil_to_material_idx[wrb_class] = fallback_idx
+                                logging.warning(f"WRB class {wrb_class} ({material_name}) → fallback material index {fallback_idx}")
+                                
+                    # Check for any WRB values not covered by our mapping
+                    unique_wrb_values = np.unique(wrb_values[bare_mask])
+                    logging.info(f"WRB values found in bare areas: {unique_wrb_values}")
+                    unmapped_values = [v for v in unique_wrb_values if v not in soil_to_material_idx]
+                    if unmapped_values:
+                        logging.warning(f"Unmapped WRB values (will remain as default): {unmapped_values}")
+                    
+                    # Apply soil-aware mapping to bare areas
+                    for soil_class, target_material_idx in soil_to_material_idx.items():
+                        soil_mask = bare_mask & (wrb_values == soil_class)
+                        if np.any(soil_mask):
+                            selection_texture[soil_mask] = target_material_idx
+                            logging.info(
+                                f"Mapped {np.sum(soil_mask)} bare pixels from WRB class {soil_class} to material index {target_material_idx}"
+                            )
+                    
+                    logging.info("Soil-aware mapping applied successfully")
+                    
+                except Exception as e:
+                    logging.warning(f"Error in soil-aware mapping: {e}, falling back to standard bare soil")
+                    # Fallback to standard bare soil mapping
+                    fallback_idx = self.class_to_index.get(bare_vegetation_esa_class, default_material_index)
+                    selection_texture[bare_mask] = fallback_idx
+            else:
+                # No soil data available, use standard mapping
+                fallback_idx = self.class_to_index.get(bare_vegetation_esa_class, default_material_index)
+                selection_texture[bare_mask] = fallback_idx
+                logging.info(f"Mapped {bare_pixel_count} bare pixels to standard baresoil material (index {fallback_idx})")
+
+        if flip_vertical:
+            selection_texture = np.flipud(selection_texture)
+            logging.info("Applied vertical flip for rendering engine compatibility")
+
+        self._save_selection_texture(selection_texture, output_path)
+
+        logging.info(f"Soil-aware selection texture saved to {output_path}")
         return selection_texture
 
     def create_preview_texture(

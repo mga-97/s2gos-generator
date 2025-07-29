@@ -11,6 +11,7 @@ from ..assets.dem import DEMProcessor
 from ..assets.landcover import LandCoverProcessor
 from ..assets.mesh import MeshGenerator
 from ..assets.texture import TextureGenerator
+from ..assets.wrb_soil import WRBSoilProcessor
 from ..scene import create_s2gos_scene
 from ..utils import create_aoi_polygon
 
@@ -38,7 +39,21 @@ class SceneGenerationPipeline:
         )
 
         self.mesh_generator = MeshGenerator()
-        self.texture_generator = TextureGenerator()
+        # Initialize TextureGenerator with materials configuration for proper soil material mapping
+        materials_config_path = config.data_sources.material_config_path
+        self.texture_generator = TextureGenerator(materials_config_path=materials_config_path)
+        
+        # Initialize WRB soil processor (optional - only if WRB data is available)
+        self.wrb_soil_processor = None
+        wrb_data_path = "/home/gonzalezm/wrb/MostProbable.vrt"  
+        try:
+            if Path(wrb_data_path).exists():
+                self.wrb_soil_processor = WRBSoilProcessor(wrb_data_path)
+                logging.info("WRB soil processor initialized successfully")
+            else:
+                logging.warning(f"WRB data not found at {wrb_data_path}, soil-aware texturing disabled")
+        except Exception as e:
+            logging.warning(f"Failed to initialize WRB soil processor: {e}, soil-aware texturing disabled")
 
         self._setup_output_directories()
 
@@ -178,6 +193,88 @@ class SceneGenerationPipeline:
         logging.info(f"Land cover processing complete: {landcover_output_path}")
         return landcover_output_path
 
+    def process_wrb_soil(self) -> Optional[Path]:
+        """Process WRB soil classification data for the AOI."""
+        if not self.wrb_soil_processor:
+            logging.info("WRB soil processor not available, skipping soil processing")
+            return None
+            
+        logging.info("=== Processing WRB Soil Classification Data ===")
+
+        wrb_filename = f"wrb_soil_{self.scene_name}_{self.target_resolution_m}m.zarr"
+        wrb_output_path = self.data_dir / wrb_filename
+
+        self.wrb_soil_processor.generate_wrb_soil_data(
+            aoi_polygon=self.aoi_polygon,
+            output_path=wrb_output_path,
+            target_resolution_m=self.target_resolution_m,
+            center_lat=self.center_lat,
+            center_lon=self.center_lon,
+            aoi_size_km=self.aoi_size_km,
+        )
+
+        self.assets.wrb_soil_file = wrb_output_path
+        logging.info(f"WRB soil processing complete: {wrb_output_path}")
+        return wrb_output_path
+
+    def process_buffer_wrb_soil(self) -> Optional[Path]:
+        """Process WRB soil classification data for buffer area."""
+        if not self.enable_buffer or not self.buffer_size_km or not self.wrb_soil_processor:
+            return None
+            
+        logging.info("=== Processing Buffer WRB Soil Classification Data ===")
+
+        buffer_aoi = create_aoi_polygon(
+            center_lat=self.center_lat,
+            center_lon=self.center_lon,
+            side_length_km=self.buffer_size_km,
+        )
+
+        wrb_filename = f"wrb_soil_buffer_{self.scene_name}_{self.buffer_resolution_m}m.zarr"
+        wrb_output_path = self.data_dir / wrb_filename
+
+        self.wrb_soil_processor.generate_wrb_soil_data(
+            aoi_polygon=buffer_aoi,
+            output_path=wrb_output_path,
+            target_resolution_m=self.buffer_resolution_m,
+            center_lat=self.center_lat,
+            center_lon=self.center_lon,
+            aoi_size_km=self.buffer_size_km,
+        )
+
+        self.assets.buffer_wrb_soil_file = wrb_output_path
+        logging.info(f"Buffer WRB soil processing complete: {wrb_output_path}")
+        return wrb_output_path
+
+    def process_background_wrb_soil(self) -> Optional[Path]:
+        """Process WRB soil classification data for background area."""
+        if not self.enable_buffer or not hasattr(self.config.buffer, "background_size_km") or not self.wrb_soil_processor:
+            return None
+            
+        logging.info("=== Processing Background WRB Soil Classification Data ===")
+
+        background_aoi = create_aoi_polygon(
+            center_lat=self.center_lat,
+            center_lon=self.center_lon,
+            side_length_km=self.config.buffer.background_size_km,
+        )
+
+        wrb_filename = f"wrb_soil_background_{self.scene_name}_{self.config.buffer.background_resolution_m}m.zarr"
+        wrb_output_path = self.data_dir / wrb_filename
+
+        self.wrb_soil_processor.generate_wrb_soil_data(
+            aoi_polygon=background_aoi,
+            output_path=wrb_output_path,
+            target_resolution_m=self.config.buffer.background_resolution_m,
+            center_lat=self.center_lat,
+            center_lon=self.center_lon,
+            aoi_size_km=self.config.buffer.background_size_km,
+        )
+
+        self.assets.background_wrb_soil_file = wrb_output_path
+        logging.info(f"Background WRB soil processing complete: {wrb_output_path}")
+        return wrb_output_path
+
     def generate_mesh(self, dem_file_path: Path) -> Path:
         """Generate 3D mesh from DEM data."""
         logging.info("=== Generating 3D Mesh ===")
@@ -198,22 +295,9 @@ class SceneGenerationPipeline:
 
         return mesh_path
 
-    def generate_textures(self, landcover_file_path: Path) -> Tuple[Path, Path]:
-        """Generate texture maps from land cover data."""
+    def generate_textures(self, landcover_file_path: Path, wrb_soil_file_path: Optional[Path] = None) -> Tuple[Path, Path]:
+        """Generate texture maps from land cover data with optional soil-aware mapping."""
         logging.info("=== Generating Textures ===")
-
-        selection_texture_path, preview_texture_path = (
-            self.texture_generator.generate_textures_from_file(
-                landcover_file_path=landcover_file_path,
-                output_dir=self.textures_dir,
-                base_name=f"{self.scene_name}_{self.target_resolution_m}m",
-                create_preview=self.generate_texture_preview,
-            )
-        )
-
-        self.assets.selection_texture_file = selection_texture_path
-        if preview_texture_path:
-            self.assets.preview_texture_file = preview_texture_path
 
         # Load landcover data from Zarr format
         landcover_dataset = xr.open_zarr(landcover_file_path)
@@ -221,6 +305,56 @@ class SceneGenerationPipeline:
         if isinstance(landcover_data, xr.Dataset):
             landcover_data = landcover_data[list(landcover_data.data_vars.keys())[0]]
 
+        # Load WRB soil data if available
+        wrb_soil_data = None
+        if wrb_soil_file_path and Path(wrb_soil_file_path).exists():
+            try:
+                logging.info("Loading WRB soil data for soil-aware texturing...")
+                wrb_soil_dataset = xr.open_zarr(wrb_soil_file_path)
+                wrb_soil_data = wrb_soil_dataset["wrb_soil_class"]
+                if isinstance(wrb_soil_data, xr.Dataset):
+                    wrb_soil_data = wrb_soil_data[list(wrb_soil_data.data_vars.keys())[0]]
+                logging.info("WRB soil data loaded successfully")
+            except Exception as e:
+                logging.warning(f"Failed to load WRB soil data: {e}, using standard landcover mapping")
+                wrb_soil_data = None
+
+        # Generate selection texture using soil-aware method
+        selection_texture_path = self.textures_dir / f"{self.scene_name}_{self.target_resolution_m}m_selection.png"
+        
+        if wrb_soil_data is not None:
+            logging.info("Using soil-aware texture generation")
+            selection_texture = self.texture_generator.landcover_to_soil_aware_selection_texture(
+                landcover_data=landcover_data,
+                wrb_soil_data=wrb_soil_data,
+                output_path=selection_texture_path,
+                flip_vertical=False,
+                default_material_index=7,
+            )
+        else:
+            logging.info("Using standard landcover texture generation")
+            selection_texture = self.texture_generator.landcover_to_selection_texture(
+                landcover_data=landcover_data,
+                output_path=selection_texture_path,
+                flip_vertical=False,
+                default_material_index=7,
+            )
+
+        # Generate preview texture if requested
+        preview_texture_path = None
+        if self.generate_texture_preview:
+            preview_texture_path = self.textures_dir / f"{self.scene_name}_{self.target_resolution_m}m_preview.png"
+            self.texture_generator.create_preview_texture(
+                landcover_data=landcover_data,
+                output_path=preview_texture_path,
+                flip_vertical=True,
+            )
+
+        self.assets.selection_texture_file = selection_texture_path
+        if preview_texture_path:
+            self.assets.preview_texture_file = preview_texture_path
+
+        # Analyze landcover classes
         analysis = self.texture_generator.analyze_landcover_classes(landcover_data)
         logging.info(
             f"Texture analysis: {analysis['unique_classes']} land cover classes found"
@@ -324,22 +458,64 @@ class SceneGenerationPipeline:
         return landcover_output_path
 
     def generate_background_textures(
-        self, background_landcover_file_path: Path
+        self, background_landcover_file_path: Path, background_wrb_soil_file_path: Optional[Path] = None
     ) -> Optional[Tuple[Path, Path]]:
-        """Generate texture maps for background area (mirrors buffer system)."""
+        """Generate texture maps for background area with soil-aware mapping."""
         if not background_landcover_file_path:
             return None, None
 
         logging.info("=== Generating Background Textures ===")
 
-        selection_texture_path, preview_texture_path = (
-            self.texture_generator.generate_textures_from_file(
-                landcover_file_path=background_landcover_file_path,
-                output_dir=self.textures_dir,
-                base_name=f"{self.scene_name}_background_{self.config.buffer.background_resolution_m}m",
-                create_preview=self.generate_texture_preview,
+        # Load landcover data from Zarr format
+        landcover_dataset = xr.open_zarr(background_landcover_file_path)
+        landcover_data = landcover_dataset["landcover"]
+        if isinstance(landcover_data, xr.Dataset):
+            landcover_data = landcover_data[list(landcover_data.data_vars.keys())[0]]
+
+        # Load WRB soil data if available
+        wrb_soil_data = None
+        if background_wrb_soil_file_path and Path(background_wrb_soil_file_path).exists():
+            try:
+                logging.info("Loading background WRB soil data for soil-aware texturing...")
+                wrb_soil_dataset = xr.open_zarr(background_wrb_soil_file_path)
+                wrb_soil_data = wrb_soil_dataset["wrb_soil_class"]
+                if isinstance(wrb_soil_data, xr.Dataset):
+                    wrb_soil_data = wrb_soil_data[list(wrb_soil_data.data_vars.keys())[0]]
+                logging.info("Background WRB soil data loaded successfully")
+            except Exception as e:
+                logging.warning(f"Failed to load background WRB soil data: {e}, using standard landcover mapping")
+                wrb_soil_data = None
+
+        # Generate selection texture using soil-aware method
+        selection_texture_path = self.textures_dir / f"{self.scene_name}_background_{self.config.buffer.background_resolution_m}m_selection.png"
+        
+        if wrb_soil_data is not None:
+            logging.info("Using soil-aware background texture generation")
+            selection_texture = self.texture_generator.landcover_to_soil_aware_selection_texture(
+                landcover_data=landcover_data,
+                wrb_soil_data=wrb_soil_data,
+                output_path=selection_texture_path,
+                flip_vertical=False,
+                default_material_index=7,
             )
-        )
+        else:
+            logging.info("Using standard background landcover texture generation")
+            selection_texture = self.texture_generator.landcover_to_selection_texture(
+                landcover_data=landcover_data,
+                output_path=selection_texture_path,
+                flip_vertical=False,
+                default_material_index=7,
+            )
+
+        # Generate preview texture if requested
+        preview_texture_path = None
+        if self.generate_texture_preview:
+            preview_texture_path = self.textures_dir / f"{self.scene_name}_background_{self.config.buffer.background_resolution_m}m_preview.png"
+            self.texture_generator.create_preview_texture(
+                landcover_data=landcover_data,
+                output_path=preview_texture_path,
+                flip_vertical=True,
+            )
 
         self.assets.background_selection_texture_file = selection_texture_path
         if preview_texture_path:
@@ -372,22 +548,64 @@ class SceneGenerationPipeline:
         return mesh_path
 
     def generate_buffer_textures(
-        self, buffer_landcover_file_path: Path
+        self, buffer_landcover_file_path: Path, buffer_wrb_soil_file_path: Optional[Path] = None
     ) -> Optional[Tuple[Path, Path]]:
-        """Generate texture maps for buffer area."""
+        """Generate texture maps for buffer area with soil-aware mapping."""
         if not buffer_landcover_file_path:
             return None, None
 
         logging.info("=== Generating Buffer Textures ===")
 
-        selection_texture_path, preview_texture_path = (
-            self.texture_generator.generate_textures_from_file(
-                landcover_file_path=buffer_landcover_file_path,
-                output_dir=self.textures_dir,
-                base_name=f"{self.scene_name}_buffer_{self.buffer_resolution_m}m",
-                create_preview=self.generate_texture_preview,
+        # Load landcover data from Zarr format
+        landcover_dataset = xr.open_zarr(buffer_landcover_file_path)
+        landcover_data = landcover_dataset["landcover"]
+        if isinstance(landcover_data, xr.Dataset):
+            landcover_data = landcover_data[list(landcover_data.data_vars.keys())[0]]
+
+        # Load WRB soil data if available
+        wrb_soil_data = None
+        if buffer_wrb_soil_file_path and Path(buffer_wrb_soil_file_path).exists():
+            try:
+                logging.info("Loading buffer WRB soil data for soil-aware texturing...")
+                wrb_soil_dataset = xr.open_zarr(buffer_wrb_soil_file_path)
+                wrb_soil_data = wrb_soil_dataset["wrb_soil_class"]
+                if isinstance(wrb_soil_data, xr.Dataset):
+                    wrb_soil_data = wrb_soil_data[list(wrb_soil_data.data_vars.keys())[0]]
+                logging.info("Buffer WRB soil data loaded successfully")
+            except Exception as e:
+                logging.warning(f"Failed to load buffer WRB soil data: {e}, using standard landcover mapping")
+                wrb_soil_data = None
+
+        # Generate selection texture using soil-aware method
+        selection_texture_path = self.textures_dir / f"{self.scene_name}_buffer_{self.buffer_resolution_m}m_selection.png"
+        
+        if wrb_soil_data is not None:
+            logging.info("Using soil-aware buffer texture generation")
+            selection_texture = self.texture_generator.landcover_to_soil_aware_selection_texture(
+                landcover_data=landcover_data,
+                wrb_soil_data=wrb_soil_data,
+                output_path=selection_texture_path,
+                flip_vertical=False,
+                default_material_index=7,
             )
-        )
+        else:
+            logging.info("Using standard buffer landcover texture generation")
+            selection_texture = self.texture_generator.landcover_to_selection_texture(
+                landcover_data=landcover_data,
+                output_path=selection_texture_path,
+                flip_vertical=False,
+                default_material_index=7,
+            )
+
+        # Generate preview texture if requested
+        preview_texture_path = None
+        if self.generate_texture_preview:
+            preview_texture_path = self.textures_dir / f"{self.scene_name}_buffer_{self.buffer_resolution_m}m_preview.png"
+            self.texture_generator.create_preview_texture(
+                landcover_data=landcover_data,
+                output_path=preview_texture_path,
+                flip_vertical=True,
+            )
 
         self.assets.buffer_selection_texture_file = selection_texture_path
         if preview_texture_path:
@@ -471,8 +689,9 @@ class SceneGenerationPipeline:
             self.generate_aoi()
             dem_file = self.process_dem()
             landcover_file = self.process_landcover()
+            wrb_soil_file = self.process_wrb_soil()  # Process WRB soil data
             self.generate_mesh(dem_file)
-            texture_selection, texture_preview = self.generate_textures(landcover_file)
+            texture_selection, texture_preview = self.generate_textures(landcover_file, wrb_soil_file)
 
             buffer_dem_file = None
             buffer_landcover_file = None
@@ -486,27 +705,34 @@ class SceneGenerationPipeline:
             if self.enable_buffer:
                 buffer_dem_file = self.process_buffer_dem()
                 buffer_landcover_file = self.process_buffer_landcover()
+                buffer_wrb_soil_file = self.process_buffer_wrb_soil()  # Process buffer WRB soil data
                 if buffer_dem_file:
                     self.generate_buffer_mesh(buffer_dem_file)
                 if buffer_landcover_file:
                     buffer_texture_selection, buffer_texture_preview = (
-                        self.generate_buffer_textures(buffer_landcover_file)
+                        self.generate_buffer_textures(buffer_landcover_file, buffer_wrb_soil_file)
                     )
 
                 background_landcover_file = self.process_background_landcover()
+                background_wrb_soil_file = self.process_background_wrb_soil()  # Process background WRB soil data
                 if background_landcover_file:
                     background_texture_selection, background_texture_preview = (
-                        self.generate_background_textures(background_landcover_file)
+                        self.generate_background_textures(background_landcover_file, background_wrb_soil_file)
                     )
 
             scene_config = self._create_scene_config()
             scene_config_file = self.output_dir / f"{self.scene_name}.yml"
+            scene_config_file_json = self.output_dir / f"{self.scene_name}.json"
+
             scene_config.save_yaml(scene_config_file)
+            scene_config.save_json(scene_config_file_json)
 
             self.assets.config_file = scene_config_file
 
             logging.info("=== Pipeline Complete ===")
             logging.info(f"Scene configuration saved to: {scene_config_file}")
+            logging.info(f"Scene configuration saved to: {scene_config_file_json}")
+
 
             return scene_config
 

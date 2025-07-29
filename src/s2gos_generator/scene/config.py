@@ -227,16 +227,60 @@ def create_s2gos_scene(
         "moss_and_lichen": 10,
     }
 
+    # Load materials using the same approach as TextureGenerator for consistency
     material_mapping = get_landcover_mapping(material_config_path)
-
     if landcover_mapping_overrides:
         material_mapping.update(landcover_mapping_overrides)
 
+    # Create material_indices that matches TextureGenerator's exact ordering
     material_indices = {}
-    for landcover_class_name, texture_index in landcover_ids.items():
-        if landcover_class_name in material_mapping:
-            material_name = material_mapping[landcover_class_name]
-            material_indices[texture_index] = material_name
+    
+    if material_config_path:
+        import json
+        try:
+            with open(material_config_path, 'r') as f:
+                config = json.load(f)
+            
+            materials_config = config.get("materials", {})
+            landcover_mapping = config.get("landcover_mapping", {})
+            
+            # Build materials list using the EXACT SAME approach as TextureGenerator._load_materials_from_config
+            material_index = 0
+            
+            # Use the EXACT same landcover order as TextureGenerator (texture.py:137-141)
+            landcover_order = [
+                "tree_cover", "shrubland", "grassland", "cropland", "built_up", 
+                "bare_sparse_vegetation", "snow_and_ice", "permanent_water_bodies", 
+                "herbaceous_wetland", "mangroves", "moss_and_lichen"
+            ]
+            
+            # Add landcover materials in the exact same order as TextureGenerator
+            for landcover_class in landcover_order:
+                if landcover_class in landcover_mapping:
+                    material_name = landcover_mapping[landcover_class]
+                    if material_name in materials_config:
+                        material_indices[str(material_index)] = material_name
+                        material_index += 1
+            
+            # Add additional materials (like soil types) that aren't in landcover mapping  
+            for material_name in materials_config.keys():
+                if material_name not in landcover_mapping.values():
+                    material_indices[str(material_index)] = material_name
+                    material_index += 1
+                    
+        except Exception as e:
+            print(f"Warning: Failed to load materials from {material_config_path}: {e}")
+            # Fallback to basic landcover mapping
+            for landcover_class_name, texture_index in landcover_ids.items():
+                if landcover_class_name in material_mapping:
+                    material_name = material_mapping[landcover_class_name]
+                    material_indices[str(texture_index)] = material_name
+    else:
+        # Fallback to basic landcover mapping if no config path
+        for landcover_class_name, texture_index in landcover_ids.items():
+            if landcover_class_name in material_mapping:
+                material_name = material_mapping[landcover_class_name]
+                material_indices[str(texture_index)] = material_name
 
     target = {
         "mesh": mesh_path,

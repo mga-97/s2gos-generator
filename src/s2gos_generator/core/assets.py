@@ -9,6 +9,7 @@ class SceneAssets:
 
     dem_file: Optional[Path] = None
     landcover_file: Optional[Path] = None
+    wrb_soil_file: Optional[Path] = None
     mesh_file: Optional[Path] = None
     selection_texture_file: Optional[Path] = None
     preview_texture_file: Optional[Path] = None
@@ -17,11 +18,13 @@ class SceneAssets:
 
     buffer_dem_file: Optional[Path] = None
     buffer_landcover_file: Optional[Path] = None
+    buffer_wrb_soil_file: Optional[Path] = None
     buffer_mesh_file: Optional[Path] = None
     buffer_selection_texture_file: Optional[Path] = None
     buffer_preview_texture_file: Optional[Path] = None
 
     background_landcover_file: Optional[Path] = None
+    background_wrb_soil_file: Optional[Path] = None
     background_selection_texture_file: Optional[Path] = None
     background_preview_texture_file: Optional[Path] = None
 
@@ -30,6 +33,7 @@ class SceneAssets:
         return {
             "dem_file": str(self.dem_file) if self.dem_file else None,
             "landcover_file": str(self.landcover_file) if self.landcover_file else None,
+            "wrb_soil_file": str(self.wrb_soil_file) if self.wrb_soil_file else None,
             "mesh_file": str(self.mesh_file) if self.mesh_file else None,
             "selection_texture_file": str(self.selection_texture_file)
             if self.selection_texture_file
@@ -47,6 +51,9 @@ class SceneAssets:
             "buffer_landcover_file": str(self.buffer_landcover_file)
             if self.buffer_landcover_file
             else None,
+            "buffer_wrb_soil_file": str(self.buffer_wrb_soil_file)
+            if self.buffer_wrb_soil_file
+            else None,
             "buffer_mesh_file": str(self.buffer_mesh_file)
             if self.buffer_mesh_file
             else None,
@@ -58,6 +65,9 @@ class SceneAssets:
             else None,
             "background_landcover_file": str(self.background_landcover_file)
             if self.background_landcover_file
+            else None,
+            "background_wrb_soil_file": str(self.background_wrb_soil_file)
+            if self.background_wrb_soil_file
             else None,
             "background_selection_texture_file": str(
                 self.background_selection_texture_file

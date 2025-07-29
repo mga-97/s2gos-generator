@@ -128,6 +128,41 @@
       "pigmentation": 5.0,
       "wind_speed": 2.0,
       "wind_direction": 90.0
+    },
+    "arenosols": {
+      "type": "diffuse",
+      "reflectance": {
+        "path": "spectra/arenosols.nc",
+        "variable": "reflectance"
+      }
+    },
+    "regosols": {
+      "type": "diffuse",
+      "reflectance": {
+        "path": "spectra/regosols.nc",
+        "variable": "reflectance"
+      }
+    },
+    "leptosols": {
+      "type": "diffuse",
+      "reflectance": {
+        "path": "spectra/leptosols.nc",
+        "variable": "reflectance"
+      }
+    },
+    "calcisols": {
+      "type": "diffuse",
+      "reflectance": {
+        "path": "spectra/calcisols.nc",
+        "variable": "reflectance"
+      }
+    },
+    "solonchaks": {
+      "type": "diffuse",
+      "reflectance": {
+        "path": "spectra/solonchaks.nc",
+        "variable": "reflectance"
+      }
     }
   },
   "landcover_mapping": {

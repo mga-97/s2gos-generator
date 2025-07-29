@@ -4,6 +4,25 @@ from pyproj import CRS, Transformer
 from shapely.geometry import Polygon
 
 
+def reproject_lithology_to_omerc(gdf, center_lat: float, center_lon: float):
+    """Reproject lithology GeoDataFrame to oblique mercator projection.
+    
+    This ensures the lithology data uses the same coordinate system as the scene generator's
+    DEM and landcover processing for perfect alignment.
+    
+    Args:
+        gdf: GeoDataFrame with lithology data
+        center_lat: Center latitude for oblique mercator projection
+        center_lon: Center longitude for oblique mercator projection
+        
+    Returns:
+        GeoDataFrame reprojected to oblique mercator coordinates
+    """
+    # Use same oblique mercator projection as scene generator
+    omerc_crs = f"+proj=omerc +lat_0={center_lat} +lonc={center_lon} +alpha=0 +gamma=0 +k=1 +x_0=0 +y_0=0 +ellps=WGS84 +units=m"
+    return gdf.to_crs(omerc_crs)
+
+
 def create_aoi_polygon(
     center_lat: float, center_lon: float, side_length_km: float = 200.0
 ) -> Polygon:
